@@ -21,6 +21,20 @@ const nodeStyle = {
   boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
 };
 
+/* ---------------- HELPER TO FLATTEN OBJECTS ---------------- */
+const flattenObject = (obj, parentKey = "", result = {}) => {
+  for (let key in obj) {
+    if (!obj.hasOwnProperty(key)) continue;
+    const newKey = parentKey ? `${parentKey}.${key}` : key;
+    if (obj[key] && typeof obj[key] === "object" && !Array.isArray(obj[key])) {
+      flattenObject(obj[key], newKey, result);
+    } else {
+      result[newKey] = obj[key];
+    }
+  }
+  return result;
+};
+
 function App() {
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
@@ -55,10 +69,55 @@ function App() {
     []
   );
 
+  const getMergedApiData = (dataflowNode, currentNodes = nodes, currentEdges = edges) => {
+    const connectedEdges = currentEdges.filter((e) => e.target === dataflowNode.id);
+    const apiNodes = connectedEdges
+      .map((e) => currentNodes.find((n) => n.id === e.source && n.data.type === "api"))
+      .filter((n) => n && n.data.apiResponse);
+
+    let mergedData = [];
+    apiNodes.forEach((n) => {
+      if (Array.isArray(n.data.apiResponse)) {
+        n.data.apiResponse.forEach((row) => {
+          mergedData.push(flattenObject(row));
+        });
+      } else if (n.data.apiResponse && typeof n.data.apiResponse === "object") {
+        mergedData.push(flattenObject(n.data.apiResponse));
+      }
+    });
+
+    const allFields = Array.from(new Set(mergedData.flatMap((row) => Object.keys(row))));
+    return { mergedData, allFields };
+  };
+
   const onEdgesChange = useCallback(
-    (changes) =>
-      setEdges((edgesSnapshot) => applyEdgeChanges(changes, edgesSnapshot)),
-    []
+    (changes) => {
+      setEdges((edgesSnapshot) => {
+        const updatedEdges = applyEdgeChanges(changes, edgesSnapshot);
+
+        // Update all Data Flow Nodes
+        setNodes((nds) =>
+          nds.map((node) => {
+            if (node.data.type === "dataflow") {
+              const { mergedData, allFields } = getMergedApiData(node, nds, updatedEdges);
+              const savedTables = node.data.selectedTables || [];
+              return {
+                ...node,
+                data: {
+                  ...node.data,
+                  availableTables: allFields.filter((t) => !savedTables.includes(t)),
+                  mergedData,
+                },
+              };
+            }
+            return node;
+          })
+        );
+
+        return updatedEdges;
+      });
+    },
+    [nodes, edges]
   );
 
   const onConnect = useCallback(
@@ -97,38 +156,15 @@ function App() {
   const onNodeDoubleClick = (event, node) => {
     setSelectedNode(node);
 
-    /* API NODE */
     if (node.data.type === "api") {
       setApiForm(node.data.config || { name: "", url: "", method: "GET", headers: "" });
       setShowApiModal(true);
     }
 
-    /* DATA FLOW NODE */
     if (node.data.type === "dataflow") {
-      // 🔹 Find all edges where this node is the target
-      const connectedEdges = edges.filter((e) => e.target === node.id);
-      const apiNodes = connectedEdges
-        .map((e) => nodes.find((n) => n.id === e.source && n.data.type === "api"))
-        .filter((n) => n && n.data.apiResponse);
-
-      if (!apiNodes.length) {
-        alert("No API connected with data.");
-        return;
-      }
-
-      // 🔹 Merge all API responses
-      let mergedData = [];
-      apiNodes.forEach((n) => {
-        if (Array.isArray(n.data.apiResponse)) {
-          mergedData = mergedData.concat(n.data.apiResponse);
-        }
-      });
-
-      // 🔹 All unique fields
-      const allFields = Array.from(new Set(mergedData.flatMap((row) => Object.keys(row))));
+      const { mergedData, allFields } = getMergedApiData(node);
 
       const savedTables = node.data.selectedTables || [];
-
       setSelectedTables(savedTables);
       setAvailableTables(allFields.filter((t) => !savedTables.includes(t)));
       setPreviewData(mergedData);
@@ -214,7 +250,9 @@ function App() {
             {previewData.slice(0, 10).map((row, i) => (
               <tr key={i}>
                 {selectedTables.map((col) => (
-                  <td key={col} style={td}>{String(row[col] ?? "")}</td>
+                  <td key={col} style={td}>
+                    {typeof row[col] === "object" ? JSON.stringify(row[col]) : String(row[col] ?? "")}
+                  </td>
                 ))}
               </tr>
             ))}
